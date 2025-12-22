@@ -1,21 +1,34 @@
+# backend/main.py
+import os
+from dotenv import load_dotenv
+
+# ✅ LOAD ENV BEFORE ANYTHING ELSE
+load_dotenv()
+
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import os
+
+from backend.services.document_service import DocumentService
+from backend.services.vector_db_service import VectorDBService
+from backend.services.llm_service import LLMService
+from backend.services.rag_service import RAGService
+from backend.services.chunking_service import TextSplitter
 
 
+# ✅ VERIFY API KEY IMMEDIATELY
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Correct service imports
-from .services.llm_service import LLMService
-from .services.vector_db_service import VectorDBService
-from .services.document_service import DocumentService
-from .services.rag_service import RAGService
+if not GROQ_API_KEY:
+    raise RuntimeError("❌ GROQ_API_KEY not found. Check .env location.")
 
+print("✅ GROQ_API_KEY loaded")
 
-# Initialize FastAPI
+# -------------------------
+# FastAPI App
+# -------------------------
 app = FastAPI()
 
-# Enable CORS (for Swagger UI & frontend)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,34 +37,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Storage folder
-STORAGE_DIR = "storage"
-os.makedirs(STORAGE_DIR, exist_ok=True)
-
-# Initialize services
-document_service = DocumentService(storage_dir=STORAGE_DIR)
+# -------------------------
+# Services (ORDER MATTERS)
+# -------------------------
+document_service = DocumentService(storage_dir="storage")
 vector_service = VectorDBService()
-llm_service = LLMService(api_key="YOUR_GROQ_API_KEY")
+llm_service = LLMService(api_key=GROQ_API_KEY)
 rag_service = RAGService(vector_service, llm_service)
 
-# Pydantic model
+# -------------------------
+# Models
+# -------------------------
 class QueryRequest(BaseModel):
     query: str
 
-# Health endpoint
+# -------------------------
+# Routes
+# -------------------------
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# Upload endpoint
 @app.post("/upload-document")
 async def upload_document(file: UploadFile = File(...)):
     content = await file.read()
     text = document_service.save_document(file.filename, content)
-    vector_service.add_document(text)
-    return {"message": "Uploaded + embedded", "filename": file.filename}
+    splitter = TextSplitter(chunk_size=500, overlap=100)
+    chunks = splitter.split_text(text, file.filename)
+    vector_service.add_documents(chunks)
 
-# Query endpoint
+
+    return {
+        "message": "Uploaded + embedded",
+        "filename": file.filename,
+        "chunks": len(chunks),
+    }
+
 @app.post("/query")
-def query_endpoint(data: QueryRequest):
-    return rag_service.query(data.query)
+def query_docs(req: QueryRequest):
+    return rag_service.query(req.query)
